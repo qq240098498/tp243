@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>冷链温控与批次放行台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="error-banner" id="errorBanner" hidden></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-title">冷链温控与批次放行台</span>
+    </div>
+    <div class="topbar-right">
+      <span class="today" id="todayText">—</span>
+      <button type="button" class="btn btn-primary" id="settingsBtn" data-action="open-settings">设置</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs" role="tablist">
+    <button type="button" class="tab is-active" data-view="overview">概览</button>
+    <button type="button" class="tab" data-view="rooms">冷库与探头</button>
+    <button type="button" class="tab" data-view="batches">批次</button>
+    <button type="button" class="tab" data-view="records">温度记录</button>
+    <button type="button" class="tab" data-view="releases">放行台账</button>
+  </nav>
+
+  <main class="layout">
+    <aside class="filters" id="filters"></aside>
+
+    <section class="content" id="content">
+      <div class="view is-active" data-view="overview" id="view-overview">
+        <div class="cards" id="overviewCards"></div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>分库一览</h2>
+            <span class="panel-hint">点一行跳到冷库标签并展开</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>编码</th><th>名称</th><th>类型</th><th>状态</th>
+                  <th class="num">探头数</th><th class="num">批次数</th><th class="num">在办批次数</th>
+                </tr>
+              </thead>
+              <tbody id="overviewRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" data-view="rooms" id="view-rooms">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>冷库台账</h2>
+            <button type="button" class="btn" data-action="room-add">新增冷库</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>编码</th><th>名称</th><th>类型</th><th>位置</th><th class="num">库位</th>
+                  <th>状态</th><th class="num">探头数</th><th class="num">批次数</th>
+                  <th class="num">在办批次数</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="roomRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>探头台账</h2>
+            <button type="button" class="btn" data-action="probe-add">新增探头</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>编号</th><th>所属冷库</th><th>位置</th><th>状态</th><th>校准有效期</th>
+                  <th class="num">记录条数</th><th class="num">人工条数</th><th>是否已过期</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="probeRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" data-view="batches" id="view-batches">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>批次清单</h2>
+            <span class="panel-hint">点一行展开温度记录、超限段、断链与放行判定</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>批次号</th><th>品名</th><th>规格</th><th class="num">件数</th><th>所在冷库</th>
+                  <th>入库时刻</th><th>状态</th><th class="num">记录数</th><th class="num">最长超限</th>
+                  <th class="num">累计超限</th><th class="num">MKT</th><th class="num">断链数</th><th>放行情况</th>
+                </tr>
+              </thead>
+              <tbody id="batchRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" data-view="records" id="view-records">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>温度记录</h2>
+            <button type="button" class="btn" data-action="record-add">新增记录</button>
+          </div>
+          <div class="records-note" id="recordsNote"></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>批次</th><th>探头</th><th>时刻</th><th class="num">温度(℃)</th><th>来源</th>
+                  <th>登记人</th><th>是否超限</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="recordRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" data-view="releases" id="view-releases">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>放行台账</h2>
+            <span class="panel-hint" id="releasesNote"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>批次</th><th>决定</th><th>时刻</th><th>经办人</th><th class="num">当时的 MKT</th>
+                  <th class="num">最长超限</th><th class="num">累计超限</th><th class="num">断链数</th>
+                  <th>依据</th><th>备注</th>
+                </tr>
+              </thead>
+              <tbody id="releaseRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal-mask" id="modalMask" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head">
+        <h3 id="modalTitle">标题</h3>
+        <button type="button" class="icon-btn" id="modalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot">
+        <button type="button" class="btn" id="modalCancel">取消</button>
+        <button type="button" class="btn btn-primary" id="modalOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
