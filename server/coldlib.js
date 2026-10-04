@@ -1,6 +1,10 @@
 // 温控口径都集中在这里：超限段、断链、MKT、放行判定
 const store = require('./store');
 
+// 断链归因分类；其中「可豁免」分类经确认后，对应缺口才不计入放行判定
+const GAP_CATEGORIES = ['设备离线', '探头切换', '人工漏记', '运输途中无信号', '待查'];
+const EXEMPTIBLE_CATEGORIES = ['探头切换', '运输途中无信号'];
+
 function toDate(text) {
   return new Date(String(text).replace(' ', 'T') + '+08:00');
 }
@@ -16,9 +20,12 @@ function probeOf(data, probeId) {
   return data.probes.find((p) => p.id === probeId) || null;
 }
 
-// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准
-function effectiveRecords(data, batchId) {
-  const rows = recordsOfBatch(data, batchId);
+// 手工类来源（人工、补录）：同一探头同一时刻与自动记录冲突时，以手工类为准
+function manualLike(source) {
+  return source === '人工' || source === '补录';
+}
+
+function pickEffective(rows) {
   const picked = {};
   const order = [];
   for (const row of rows) {
@@ -29,9 +36,19 @@ function effectiveRecords(data, batchId) {
       continue;
     }
     const current = picked[key];
-    if (current.source === '人工' && row.source === '自动') picked[key] = row;
+    if (!manualLike(current.source) && manualLike(row.source)) picked[key] = row;
   }
   return order.map((key) => picked[key]);
+}
+
+// 同一探头同一时刻既有自动记录又有手工更正时，以手工为准
+function effectiveRecords(data, batchId) {
+  return pickEffective(recordsOfBatch(data, batchId));
+}
+
+// 原始记录时间线：补录记录不参与——断链缺口按当时采的记录判定，补录不把断链抹掉
+function originalEffectiveRecords(data, batchId) {
+  return pickEffective(recordsOfBatch(data, batchId).filter((r) => r.source !== '补录'));
 }
 
 // 超限：连续超出上下限的时段，回到范围内即断开
@@ -73,18 +90,47 @@ function excursionStats(data, batchId) {
   });
 }
 
-// 断链：相邻记录的时刻差超过门槛
+// 断链：相邻两条原始记录（非补录）的时刻差超过门槛算一处，缺口时长按实际时刻差算。
+// 补录不把断链抹掉：缺口一旦成立就保留「曾经断链」，只有登记为可豁免分类且经确认才不计入判定。
 function chainGaps(data, batchId) {
   const settings = data.settings;
-  const rows = effectiveRecords(data, batchId);
+  const rows = originalEffectiveRecords(data, batchId);
+  const backfills = data.records.filter((r) => r.batchId === batchId && r.source === '补录');
+  const attributions = (data.gapAttributions || []).filter((a) => a.batchId === batchId);
   const gaps = [];
   for (let i = 1; i < rows.length; i += 1) {
     const minutes = store.minutesBetween(rows[i - 1].at, rows[i].at);
     if (minutes > Number(settings.chainGapMinutes)) {
-      gaps.push({ from: rows[i - 1].at, to: rows[i].at, minutes, countedMinutes: Number(settings.recordIntervalMinutes) });
+      const from = rows[i - 1].at;
+      const to = rows[i].at;
+      const attribution = attributions.find((a) => a.gapFrom === from && a.gapTo === to) || null;
+      const exemptible = !!(attribution && EXEMPTIBLE_CATEGORIES.includes(attribution.category));
+      const exempted = !!(attribution && attribution.confirmed && exemptible);
+      gaps.push({
+        from,
+        to,
+        minutes,
+        backfillCount: backfills.filter((r) => r.at > from && r.at < to).length,
+        attribution: attribution ? decorateGapAttribution(attribution) : null,
+        exemptible,
+        exempted,
+        countsInDecision: !exempted,
+      });
     }
   }
-  return { gaps, gapCount: gaps.length, totalGapMinutes: gaps.reduce((acc, g) => acc + g.countedMinutes, 0) };
+  const gapCount = gaps.length;
+  const exemptedGapCount = gaps.filter((g) => g.exempted).length;
+  return {
+    gaps,
+    gapCount,
+    effectiveGapCount: gapCount - exemptedGapCount,
+    exemptedGapCount,
+    totalGapMinutes: gaps.reduce((acc, g) => acc + g.minutes, 0),
+  };
+}
+
+function decorateGapAttribution(a) {
+  return Object.assign({}, a, { exemptible: EXEMPTIBLE_CATEGORIES.includes(a.category) });
 }
 
 // MKT：平均动力学温度
@@ -140,7 +186,7 @@ function releaseCheck(data, batch) {
   const conditions = [
     { key: 'longest', ok: stats.longestMinutes <= Number(settings.allowExcursionMinutes), value: stats.longestMinutes, limit: Number(settings.allowExcursionMinutes), text: '单次连续超限不超过 ' + settings.allowExcursionMinutes + ' 分钟' },
     { key: 'total', ok: accumulated <= Number(settings.allowTotalExcursionMinutes), value: accumulated, limit: Number(settings.allowTotalExcursionMinutes), text: '累计超限不超过 ' + settings.allowTotalExcursionMinutes + ' 分钟' },
-    { key: 'chain', ok: chain.gapCount === 0, value: chain.gapCount, limit: 0, text: '全程没有断链' },
+    { key: 'chain', ok: chain.effectiveGapCount === 0, value: chain.effectiveGapCount, limit: 0, text: '全程没有断链（登记为可豁免分类且经确认的缺口不计入）' },
   ];
   return {
     mkt: mktCelsius(data, batch.id),
@@ -162,6 +208,7 @@ module.exports = {
   probeOf,
   recordsOfBatch,
   effectiveRecords,
+  originalEffectiveRecords,
   excursionStats,
   chainGaps,
   mktCelsius,
@@ -170,4 +217,7 @@ module.exports = {
   accumulatedExcursionMinutes,
   monthlyExcursionMinutes,
   releaseCheck,
+  decorateGapAttribution,
+  GAP_CATEGORIES,
+  EXEMPTIBLE_CATEGORIES,
 };

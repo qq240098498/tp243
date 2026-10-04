@@ -8,7 +8,9 @@ const BATCH_STATUS = ['在库', '待放行', '已放行', '已拒收'];
 const ROOM_STATUS = ['运行', '检修', '停用'];
 const ROOM_TYPE = ['冷藏库', '冷藏车', '冷冻库'];
 const PROBE_STATUS = ['在用', '停用', '送检'];
-const SOURCE_LIST = ['自动', '人工'];
+const SOURCE_LIST = ['自动', '人工', '补录'];
+const GAP_CATEGORIES = ['设备离线', '探头切换', '人工漏记', '运输途中无信号', '待查'];
+const EXEMPTIBLE_CATEGORIES = ['探头切换', '运输途中无信号'];
 
 const state = {
   view: 'overview',
@@ -210,8 +212,9 @@ function renderOverview() {
     { title: '已过校准期探头', value: s.expiredProbeCount, sub: '需送检', go: { view: 'rooms', probeCal: 'expired' } },
     { title: '批次', value: s.batchCount, sub: statusSummaryText(sc), go: { view: 'batches' } },
     { title: '在办批次', value: s.openBatchCount, sub: '在库与待放行', go: { view: 'batches' } },
-    { title: '温度记录', value: s.recordCount, sub: '人工 ' + s.manualRecordCount, go: { view: 'records' } },
+    { title: '温度记录', value: s.recordCount, sub: '人工 ' + s.manualRecordCount + ' · 补录 ' + num(s.backfillRecordCount), go: { view: 'records' } },
     { title: '放行 / 拒收', value: s.releasedCount + ' / ' + s.rejectedCount, sub: '台账 ' + s.releaseCount + ' 条', go: { view: 'releases' } },
+    { title: '断链缺口', value: num(s.chainGapTotal), sub: '待归因 ' + num(s.chainGapUnattributed) + ' · 已豁免 ' + num(s.chainGapExempted), go: { view: 'batches' } },
     { title: '满足放行条件', value: s.readyToRelease, sub: '被挡下 ' + s.blockedCount, go: { view: 'batches' } },
     { title: '没有温度记录', value: s.noRecordBatches, sub: '个批次', go: { view: 'batches', noRecord: true } },
     { title: 'MKT', value: s.maxMkt, sub: '平均 ' + s.averageMkt, go: { view: 'batches' } }
@@ -385,7 +388,7 @@ function renderBatchRows() {
       '<td class="num">' + num(b.longestExcursionMinutes) + '</td>' +
       '<td class="num">' + num(b.totalExcursionMinutes) + '</td>' +
       '<td class="num">' + num(b.mkt) + '</td>' +
-      '<td class="num">' + num(b.chainGapCount) + '</td>' +
+      '<td class="num">' + num(b.chainGapCount) + (num(b.exemptedChainGapCount) ? '<div class="gap-meta">豁免 ' + num(b.exemptedChainGapCount) + '</div>' : '') + '</td>' +
       '<td>' + releaseSituation(b) + '</td>' +
       '</tr>';
     if (!state.expandedBatches.has(b.id)) return main;
@@ -400,8 +403,11 @@ function batchDetailRow(b) {
 
   const records = (d.records || []).map(function (r) {
     const oor = out[r.id];
+    const sourceHtml = r.source === '补录'
+      ? pill('补录', 'pill-backfill') + '<div class="gap-meta">依据：' + esc(r.backfillBasis) + '</div><div class="gap-meta">补录于 ' + esc(r.backfillAt) + '</div>'
+      : esc(r.source);
     return '<tr><td>' + esc(r.at) + '</td><td>' + esc(r.probeCode) + '</td><td class="num">' + num(r.temperatureC) + '</td>' +
-      '<td>' + esc(r.source) + '</td>' +
+      '<td>' + sourceHtml + '</td>' +
       '<td>' + (oor ? pill('超限', 'pill-bad') : pill('正常', 'pill-mute')) + '</td>' +
       '<td>' + (r.probeExpired ? pill('已过期', 'pill-bad') : pill('有效', 'pill-mute')) + '</td></tr>';
   }).join('') || '<tr><td colspan="6" class="empty">没有温度记录</td></tr>';
@@ -418,10 +424,32 @@ function batchDetailRow(b) {
     segmentsHtml = '<table class="mini-table"><thead><tr><th>起</th><th>止</th><th class="num">时长(分)</th><th class="num">峰值(℃)</th><th class="num">点数</th></tr></thead><tbody>' + segRows + '</tbody></table>';
   }
 
-  const gaps = (d.chainGaps || []).map(function (g) {
+  const gapList = d.chainGaps || [];
+  const countedGaps = gapList.filter(function (g) { return g.countsInDecision; }).length;
+  const gaps = gapList.map(function (g) {
+    const a = g.attribution;
+    const attrHtml = a
+      ? pill(a.category, a.exemptible ? 'pill-backfill' : 'pill-mute') +
+        '<div class="gap-meta">' + esc(a.registrar) + ' · ' + esc(a.registeredAt) + '</div>' +
+        '<div class="gap-meta">依据：' + esc(a.basis) + '</div>' +
+        (a.confirmed
+          ? '<div class="gap-meta">已确认：' + esc(a.confirmedBy) + ' · ' + esc(a.confirmedAt) + '</div>'
+          : '<div class="gap-meta">未确认</div>')
+      : '<span class="gap-meta">待归因</span>';
+    const btns = '<button type="button" class="btn btn-sm" data-action="gap-attribute" data-batch-id="' + esc(b.id) + '" data-from="' + esc(g.from) + '" data-to="' + esc(g.to) + '">' + (a ? '改归因' : '登记归因') + '</button>' +
+      (a && !a.confirmed ? '<button type="button" class="btn btn-sm" data-action="gap-confirm" data-id="' + esc(a.id) + '">确认</button>' : '');
     return '<tr><td>' + esc(g.from) + '</td><td>' + esc(g.to) + '</td><td class="num">' + num(g.minutes) + '</td>' +
-      '<td class="num">' + num(g.countedMinutes) + '</td></tr>';
-  }).join('') || '<tr><td colspan="4" class="empty">没有断链缺口</td></tr>';
+      '<td class="num">' + num(g.backfillCount) + '</td><td>' + attrHtml + '</td>' +
+      '<td>' + (g.exempted ? pill('已豁免', 'pill-ok') : pill('计入判定', 'pill-bad')) + '</td>' +
+      '<td class="cell-actions">' + btns + '</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="empty">没有断链缺口</td></tr>';
+  const orphanAttrs = (d.gapAttributions || []).filter(function (a) {
+    return !gapList.some(function (g) { return g.attribution && g.attribution.id === a.id; });
+  });
+  const orphanHtml = orphanAttrs.length
+    ? '<div class="detail-note">另有 ' + orphanAttrs.length + ' 条归因登记对应的缺口已随记录变化：' +
+      orphanAttrs.map(function (a) { return esc(a.gapFrom + ' ~ ' + a.gapTo + '（' + a.category + '，' + a.registrar + '）'); }).join('；') + '</div>'
+    : '';
 
   const check = d.releaseCheck || {};
   const conds = (check.conditions || []).slice();
@@ -452,8 +480,9 @@ function batchDetailRow(b) {
     '<div class="detail-block"><h4>温度记录（' + (d.records || []).length + '）</h4>' +
     '<table class="mini-table"><thead><tr><th>时刻</th><th>探头</th><th class="num">温度(℃)</th><th>来源</th><th>是否超限</th><th>探头是否过期</th></tr></thead><tbody>' + records + '</tbody></table></div>' +
     '<div class="detail-block"><h4>超限段（' + (d.segments || []).length + '）</h4>' + segmentsHtml +
-    '<h4>断链缺口（' + (d.chainGaps || []).length + '）</h4>' +
-    '<table class="mini-table"><thead><tr><th>起</th><th>止</th><th class="num">实际(分)</th><th class="num">计入(分)</th></tr></thead><tbody>' + gaps + '</tbody></table></div>' +
+    '<h4>断链缺口（' + gapList.length + '，计入判定 ' + countedGaps + '）</h4>' +
+    '<div class="detail-note">断链按原始记录（非补录）判定，缺口时长按实际时刻差算；补录不抹掉断链，只有登记为可豁免分类（' + EXEMPTIBLE_CATEGORIES.join('、') + '）且经确认的缺口才不计入判定。</div>' +
+    '<table class="mini-table"><thead><tr><th>起</th><th>止</th><th class="num">时长(分)</th><th class="num">补录条数</th><th>归因</th><th>判定</th><th>操作</th></tr></thead><tbody>' + gaps + '</tbody></table>' + orphanHtml + '</div>' +
     '<div class="detail-block"><h4>放行判定</h4><ul class="cond-list">' + condHtml + '</ul>' +
     '<h4>已过校准期的探头（' + expired.length + '）</h4>' +
     '<table class="mini-table"><thead><tr><th>探头</th><th>校准有效期</th><th>记录时刻</th></tr></thead><tbody>' + expiredProbes + '</tbody></table></div>' +
@@ -513,6 +542,11 @@ async function expandBatch(id) {
 
 /* ---------- 温度记录 ---------- */
 
+function backfillWindowText() {
+  const w = state.settings && state.settings.backfillWindowHours != null ? state.settings.backfillWindowHours : '—';
+  return '补录窗口 ' + w + ' 小时：按记录时刻与登记时刻（服务端当前时刻）的差计算，超过窗口的补录一律不接受';
+}
+
 async function loadRecordsView() {
   const f = state.filters.records;
   const params = new URLSearchParams();
@@ -525,12 +559,13 @@ async function loadRecordsView() {
   state.recordsView = rows;
   const batchSelected = !!f.batchId;
   const shown = batchSelected ? rows : rows.slice(0, RECORD_PAGE);
-  $('recordsNote').textContent = batchSelected
+  $('recordsNote').textContent = (batchSelected
     ? ('共 ' + rows.length + ' 条，已全部显示')
-    : ('共 ' + rows.length + ' 条，已显示前 ' + Math.min(RECORD_PAGE, rows.length) + ' 条');
+    : ('共 ' + rows.length + ' 条，已显示前 ' + Math.min(RECORD_PAGE, rows.length) + ' 条')) +
+    '；' + backfillWindowText() + '；补录记录以来源「补录」、依据与补录时刻与原记录区分';
   const tbody = $('recordRows');
   if (!shown.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">没有符合条件的温度记录</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">没有符合条件的温度记录</td></tr>';
     return;
   }
   tbody.innerHTML = shown.map(function (r) {
@@ -539,9 +574,12 @@ async function loadRecordsView() {
       '<td>' + esc(r.probeCode) + '</td>' +
       '<td>' + esc(r.at) + '</td>' +
       '<td class="num">' + num(r.temperatureC) + '</td>' +
-      '<td>' + esc(r.source) + '</td>' +
+      '<td>' + (r.source === '补录' ? pill('补录', 'pill-backfill') : esc(r.source)) + '</td>' +
       '<td>' + esc(r.operator) + '</td>' +
       '<td>' + (r.outOfRange ? pill('超限', 'pill-bad') : pill('正常', 'pill-mute')) + '</td>' +
+      '<td>' + (r.source === '补录'
+        ? '<div class="gap-meta">依据：' + esc(r.backfillBasis) + '</div><div class="gap-meta">补录于 ' + esc(r.backfillAt) + '</div>'
+        : '') + '</td>' +
       '<td class="cell-actions"><button type="button" class="btn btn-sm btn-danger" data-action="record-del" data-id="' + esc(r.id) + '">删除</button></td>' +
       '</tr>';
   }).join('');
@@ -635,7 +673,8 @@ function renderFilters() {
       '<div class="filter-field"><label>来源</label>' + selectHtml('source', [{ value: '', label: '全部' }].concat(SOURCE_LIST.map(function (s) { return { value: s, label: s }; })), f.source) + '</div>' +
       '<div class="filter-field"><label>起</label><input type="datetime-local" data-filter="from" value="' + esc(f.from) + '"></div>' +
       '<div class="filter-field"><label>止</label><input type="datetime-local" data-filter="to" value="' + esc(f.to) + '"></div>' +
-      '<div class="filter-hint">不选批次时只渲染前 ' + RECORD_PAGE + ' 条；选定批次后显示该批次全部记录。</div>';
+      '<div class="filter-hint">不选批次时只渲染前 ' + RECORD_PAGE + ' 条；选定批次后显示该批次全部记录。</div>' +
+      '<div class="filter-hint">' + esc(backfillWindowText()) + '；补录必须填登记人与依据，补录时刻由服务端记录。</div>';
   } else if (v === 'releases') {
     const f = state.filters.releases;
     html = '<h3>台账筛选</h3>' +
@@ -666,7 +705,8 @@ function openSettings() {
     '<div class="field"><label>单次允许超限（分钟）</label><input type="number" step="1" data-field="allowExcursionMinutes" value="' + esc(s.allowExcursionMinutes) + '"></div>' +
     '<div class="field"><label>累计允许超限（分钟）</label><input type="number" step="1" data-field="allowTotalExcursionMinutes" value="' + esc(s.allowTotalExcursionMinutes) + '"></div>' +
     '<div class="field"><label>断链门槛（分钟）</label><input type="number" step="1" data-field="chainGapMinutes" value="' + esc(s.chainGapMinutes) + '"></div>' +
-    '<div class="field"><label>记录间隔（分钟）</label><input type="number" step="1" data-field="recordIntervalMinutes" value="' + esc(s.recordIntervalMinutes) + '"></div>';
+    '<div class="field"><label>记录间隔（分钟）</label><input type="number" step="1" data-field="recordIntervalMinutes" value="' + esc(s.recordIntervalMinutes) + '"></div>' +
+    '<div class="field"><label>补录窗口（小时）</label><input type="number" step="1" data-field="backfillWindowHours" value="' + esc(s.backfillWindowHours) + '"><div class="field-hint">补录记录的时刻距登记时刻超过该窗口的一律不接受</div></div>';
   openModal('设置', body, '保存', async function () {
     const v = formValues();
     const payload = {
@@ -675,7 +715,8 @@ function openSettings() {
       allowExcursionMinutes: Number(v.allowExcursionMinutes),
       allowTotalExcursionMinutes: Number(v.allowTotalExcursionMinutes),
       chainGapMinutes: Number(v.chainGapMinutes),
-      recordIntervalMinutes: Number(v.recordIntervalMinutes)
+      recordIntervalMinutes: Number(v.recordIntervalMinutes),
+      backfillWindowHours: Number(v.backfillWindowHours)
     };
     try {
       state.settings = await api('PATCH', '/api/settings', payload);
@@ -765,15 +806,59 @@ function openRecordForm() {
     '<div class="field"><label>温度（℃）</label><input type="number" step="0.1" data-field="temperatureC" value=""></div>' +
     '<div class="field"><label>来源</label><select data-field="source">' + SOURCE_LIST.map(function (t) { return '<option value="' + esc(t) + '">' + esc(t) + '</option>'; }).join('') + '</select></div>' +
     '<div class="field"><label>登记人</label><input type="text" data-field="operator" value=""></div>' +
+    '<div class="field" data-backfill-only hidden><label>依据（补录必填）</label><input type="text" data-field="backfillBasis" value="" placeholder="例如：设备缓存导出单号、交接班纸面记录"></div>' +
+    '<div class="field-hint" data-backfill-only hidden>' + esc(backfillWindowText()) + '；补录时刻由服务端记录，补录不把断链抹掉。</div>' +
     '<div class="field"><label>备注</label><textarea data-field="remark"></textarea></div>';
   openModal('新增温度记录', body, '新增', async function () {
     const v = formValues();
     const payload = {
       batchId: v.batchId, probeId: v.probeId, at: v.at,
-      temperatureC: Number(v.temperatureC), source: v.source, operator: v.operator, remark: v.remark
+      temperatureC: Number(v.temperatureC), source: v.source, operator: v.operator,
+      backfillBasis: v.backfillBasis, remark: v.remark
     };
     try {
       await api('POST', '/api/records', payload);
+      closeModal();
+      await refreshAfterMutation();
+    } catch (err) { showError(err); }
+  });
+}
+
+/* 断链归因：登记或修改（修改会重置确认状态） */
+function openGapAttributionForm(batchId, from, to, existing) {
+  const catOptions = GAP_CATEGORIES.map(function (c) {
+    const label = c + (EXEMPTIBLE_CATEGORIES.includes(c) ? '（可豁免）' : '');
+    return '<option value="' + esc(c) + '"' + (existing && existing.category === c ? ' selected' : '') + '>' + esc(label) + '</option>';
+  }).join('');
+  const body =
+    '<div class="field"><label>缺口</label><input type="text" value="' + esc(from + ' ~ ' + to) + '" disabled></div>' +
+    '<div class="field"><label>分类</label><select data-field="category">' + catOptions + '</select></div>' +
+    '<div class="field"><label>登记人</label><input type="text" data-field="registrar" value="' + esc(existing ? existing.registrar : '') + '"></div>' +
+    '<div class="field"><label>依据</label><input type="text" data-field="basis" value="' + esc(existing ? existing.basis : '') + '" placeholder="例如：离线工单号、探头更换记录"></div>' +
+    '<div class="field-hint">可豁免分类：' + EXEMPTIBLE_CATEGORIES.join('、') + '；登记为可豁免分类且经确认后，该缺口才不计入放行判定。修改登记会重置确认状态。</div>';
+  openModal(existing ? '修改断链归因' : '登记断链归因', body, existing ? '保存' : '登记', async function () {
+    const v = formValues();
+    try {
+      if (existing) {
+        await api('PATCH', '/api/gap-attributions/' + encodeURIComponent(existing.id), { category: v.category, registrar: v.registrar, basis: v.basis });
+      } else {
+        await api('POST', '/api/batches/' + encodeURIComponent(batchId) + '/gap-attributions', { gapFrom: from, gapTo: to, category: v.category, registrar: v.registrar, basis: v.basis });
+      }
+      closeModal();
+      await refreshAfterMutation();
+    } catch (err) { showError(err); }
+  });
+}
+
+function openGapConfirmModal(attr) {
+  const body =
+    '<div class="field"><label>确认人</label><input type="text" data-field="confirmer" value=""></div>' +
+    '<div class="field-hint">缺口 ' + esc(attr.gapFrom) + ' ~ ' + esc(attr.gapTo) + '，分类「' + esc(attr.category) + '」。' +
+    (attr.exemptible ? '确认后该缺口不再计入放行判定。' : '该分类不可豁免，确认后缺口仍计入放行判定。') + '</div>';
+  openModal('确认断链归因', body, '确认', async function () {
+    const v = formValues();
+    try {
+      await api('POST', '/api/gap-attributions/' + encodeURIComponent(attr.id) + '/confirm', { confirmer: v.confirmer });
       closeModal();
       await refreshAfterMutation();
     } catch (err) { showError(err); }
@@ -889,6 +974,23 @@ async function handleAction(action, el) {
       return;
     }
     if (action === 'record-add') { openRecordForm(); return; }
+    if (action === 'gap-attribute') {
+      const batchId = el.dataset.batchId;
+      const d = state.batchDetail[batchId];
+      const gap = d && (d.chainGaps || []).find(function (g) { return g.from === el.dataset.from && g.to === el.dataset.to; });
+      openGapAttributionForm(batchId, el.dataset.from, el.dataset.to, gap ? gap.attribution : null);
+      return;
+    }
+    if (action === 'gap-confirm') {
+      let attr = null;
+      Object.keys(state.batchDetail).forEach(function (k) {
+        (state.batchDetail[k].chainGaps || []).forEach(function (g) {
+          if (g.attribution && g.attribution.id === el.dataset.id) attr = g.attribution;
+        });
+      });
+      if (attr) openGapConfirmModal(attr);
+      return;
+    }
     if (action === 'record-del') {
       const id = el.dataset.id;
       armDelete(el, async function () {
@@ -932,6 +1034,12 @@ $('filters').addEventListener('input', onFilterInput);
 
 $('modalClose').addEventListener('click', closeModal);
 $('modalCancel').addEventListener('click', closeModal);
+$('modalBody').addEventListener('change', function (e) {
+  if (e.target && e.target.matches('select[data-field="source"]')) {
+    const show = e.target.value === '补录';
+    $('modalBody').querySelectorAll('[data-backfill-only]').forEach(function (n) { n.hidden = !show; });
+  }
+});
 $('modalOk').addEventListener('click', function () {
   if (modalOnOk) modalOnOk();
 });

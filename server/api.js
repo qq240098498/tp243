@@ -35,6 +35,9 @@ function overview(data) {
   const noRecordBatches = data.batches.filter((b) => !data.records.some((r) => r.batchId === b.id)).length;
   const expiredProbes = data.probes.filter((p) => !coldlib.probeValidOn(p, store.nowText().slice(0, 10))).length;
   const mktValues = decorated.map((d) => d.check.mkt).filter((v) => v > 0);
+  const chainGapTotal = decorated.reduce((acc, d) => acc + d.check.chain.gapCount, 0);
+  const chainGapExempted = decorated.reduce((acc, d) => acc + d.check.chain.exemptedGapCount, 0);
+  const chainGapUnattributed = decorated.reduce((acc, d) => acc + d.check.chain.gaps.filter((g) => !g.attribution).length, 0);
   return {
     today: store.nowText().slice(0, 10),
     roomCount: data.rooms.length,
@@ -47,6 +50,10 @@ function overview(data) {
     openBatchCount: open.length,
     recordCount: data.records.length,
     manualRecordCount: data.records.filter((r) => r.source === '人工').length,
+    backfillRecordCount: data.records.filter((r) => r.source === '补录').length,
+    chainGapTotal,
+    chainGapExempted,
+    chainGapUnattributed,
     releaseCount: data.releases.length,
     releasedCount: data.releases.filter((r) => r.decision === '放行').length,
     rejectedCount: data.releases.filter((r) => r.decision === '拒收').length,
@@ -62,6 +69,7 @@ function overview(data) {
       allowTotalExcursionMinutes: Number(settings.allowTotalExcursionMinutes),
       chainGapMinutes: Number(settings.chainGapMinutes),
       recordIntervalMinutes: Number(settings.recordIntervalMinutes),
+      backfillWindowHours: Number(settings.backfillWindowHours),
     },
     rooms: data.rooms.map((r) => {
       const probes = data.probes.filter((p) => p.roomId === r.id);
@@ -112,6 +120,11 @@ router.post('/records', withData((data, req) => ({ __save: true, __body: res.cre
 router.delete('/records/:id', withData((data, req) => ({ __save: true, __body: res.removeRecord(data, req.params.id) })));
 
 router.get('/releases', withData((data, req) => res.listReleases(data, req.query)));
+
+router.get('/gap-attributions', withData((data, req) => res.listGapAttributions(data, req.query)));
+router.post('/batches/:id/gap-attributions', withData((data, req) => ({ __save: true, __body: res.createGapAttribution(data, req.params.id, req.body || {}) })));
+router.patch('/gap-attributions/:id', withData((data, req) => ({ __save: true, __body: res.updateGapAttribution(data, req.params.id, req.body || {}) })));
+router.post('/gap-attributions/:id/confirm', withData((data, req) => ({ __save: true, __body: res.confirmGapAttribution(data, req.params.id, req.body || {}) })));
 
 router.use((req, r, next) => next(new AppError(404, 'NOT_FOUND', '这个地址没有对应功能：' + req.method + ' ' + req.originalUrl)));
 

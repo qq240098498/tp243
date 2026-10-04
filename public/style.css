@@ -320,3 +320,7 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
   .layout { flex-direction: column; }
   .filters { width: 100%; flex: 1 1 auto; position: static; }
 }
+
+/* 断链归因与补录 */
+.pill-backfill { color: #8a5a00; border-color: #e8c98a; background: #fdf6e5; }
+.gap-meta { color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
