@@ -35,6 +35,9 @@ function overview(data) {
   const noRecordBatches = data.batches.filter((b) => !data.records.some((r) => r.batchId === b.id)).length;
   const expiredProbes = data.probes.filter((p) => !coldlib.probeValidOn(p, store.nowText().slice(0, 10))).length;
   const mktValues = decorated.map((d) => d.check.mkt).filter((v) => v > 0);
+  const pendingGapCount = decorated.reduce((acc, d) => acc
+    + d.check.chain.gaps.filter((g) => !g.attribution).length
+    + d.check.chain.events.filter((e) => !e.attribution).length, 0);
   return {
     today: store.nowText().slice(0, 10),
     roomCount: data.rooms.length,
@@ -47,6 +50,9 @@ function overview(data) {
     openBatchCount: open.length,
     recordCount: data.records.length,
     manualRecordCount: data.records.filter((r) => r.source === '人工').length,
+    backfillRecordCount: data.records.filter((r) => r.backfill === true).length,
+    chainEventCount: data.chainEvents.length,
+    pendingGapCount,
     releaseCount: data.releases.length,
     releasedCount: data.releases.filter((r) => r.decision === '放行').length,
     rejectedCount: data.releases.filter((r) => r.decision === '拒收').length,
@@ -62,7 +68,10 @@ function overview(data) {
       allowTotalExcursionMinutes: Number(settings.allowTotalExcursionMinutes),
       chainGapMinutes: Number(settings.chainGapMinutes),
       recordIntervalMinutes: Number(settings.recordIntervalMinutes),
+      backfillWindowHours: Number(settings.backfillWindowHours),
     },
+    gapCategories: coldlib.GAP_CATEGORIES,
+    exemptableCategories: coldlib.EXEMPTABLE_CATEGORIES,
     rooms: data.rooms.map((r) => {
       const probes = data.probes.filter((p) => p.roomId === r.id);
       const batches = data.batches.filter((b) => b.roomId === r.id);
@@ -109,7 +118,11 @@ router.post('/batches/:id/decision', withData((data, req) => ({ __save: true, __
 
 router.get('/records', withData((data, req) => res.listRecords(data, req.query)));
 router.post('/records', withData((data, req) => ({ __save: true, __body: res.createRecord(data, req.body || {}) })));
+router.post('/records/backfill', withData((data, req) => ({ __save: true, __body: res.backfillRecord(data, req.body || {}) })));
 router.delete('/records/:id', withData((data, req) => ({ __save: true, __body: res.removeRecord(data, req.params.id) })));
+
+router.post('/batches/:id/gap-attributions', withData((data, req) => ({ __save: true, __body: res.registerGapAttribution(data, req.params.id, req.body || {}) })));
+router.post('/gap-attributions/:id/confirm', withData((data, req) => ({ __save: true, __body: res.confirmGapAttribution(data, req.params.id, req.body || {}) })));
 
 router.get('/releases', withData((data, req) => res.listReleases(data, req.query)));
 

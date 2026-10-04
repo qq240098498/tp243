@@ -227,7 +227,11 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
 .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); background: #fff; }
 .pill-ok { color: var(--ok); border-color: #a9d8c4; background: var(--ok-soft); }
 .pill-bad { color: var(--accent); border-color: #f3b7b0; background: var(--accent-soft); }
+.pill-warn { color: #9a6a00; border-color: #ecd9a8; background: #fdf6e0; }
 .pill-mute { color: var(--ink-soft); }
+
+.cell-note { display: block; color: var(--ink-soft); font-size: 12px; }
+.gap-meta { color: var(--ink-soft); font-size: 12px; }
 
 .cond-list { list-style: none; margin: 0; padding: 0; }
 .cond-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--line-soft); }

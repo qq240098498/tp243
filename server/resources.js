@@ -52,7 +52,9 @@ function decorateBatch(data, batch) {
     longestExcursionMinutes: stats.longestMinutes,
     totalExcursionMinutes: stats.totalMinutes,
     mkt: check.mkt,
-    chainGapCount: check.chain.gapCount,
+    chainGapCount: check.chain.counted,
+    chainEventCount: check.chain.eventCount,
+    chainExemptedCount: check.chain.exemptedCount,
     expiredProbeCodes: check.expiredProbes.map((p) => p.probeCode),
     releaseCheck: check,
     releaseCount: releases.length,
@@ -202,6 +204,7 @@ function listBatches(data, query) {
 function batchDetail(data, id) {
   const batch = data.batches.find((b) => b.id === id);
   if (!batch) throw new AppError(404, 'BATCH_NOT_FOUND', '这个批次不存在');
+  const chain = coldlib.chainStatus(data, id);
   const rows = coldlib.recordsOfBatch(data, id).map((r) => Object.assign({}, r, {
     probeCode: probeCode(data, r.probeId),
     probeExpired: !coldlib.probeValidOn(coldlib.probeOf(data, r.probeId), String(r.at).slice(0, 10)),
@@ -210,7 +213,8 @@ function batchDetail(data, id) {
     records: rows,
     effectiveRecords: coldlib.effectiveRecords(data, id).map((r) => Object.assign({}, r, { probeCode: probeCode(data, r.probeId) })),
     segments: coldlib.excursionStats(data, id).segments,
-    chainGaps: coldlib.chainGaps(data, id).gaps,
+    chainGaps: chain.gaps,
+    chainEvents: chain.events,
     releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1)),
   });
 }
@@ -271,6 +275,8 @@ function removeBatch(data, id) {
   const used = data.records.filter((r) => r.batchId === id).length;
   data.records = data.records.filter((r) => r.batchId !== id);
   data.releases = data.releases.filter((r) => r.batchId !== id);
+  data.gapAttributions = data.gapAttributions.filter((a) => a.batchId !== id);
+  data.chainEvents = data.chainEvents.filter((e) => e.batchId !== id);
   data.batches = data.batches.filter((b) => b.id !== id);
   return { removed: id, removedRecords: used };
 }
@@ -281,12 +287,17 @@ function listRecords(data, query) {
   if (q.batchId) rows = rows.filter((r) => r.batchId === q.batchId);
   if (q.probeId) rows = rows.filter((r) => r.probeId === q.probeId);
   if (q.source) rows = rows.filter((r) => r.source === q.source);
+  if (q.backfill === 'yes') rows = rows.filter((r) => r.backfill === true);
+  if (q.backfill === 'no') rows = rows.filter((r) => r.backfill !== true);
   if (q.from) rows = rows.filter((r) => r.at >= q.from);
   if (q.to) rows = rows.filter((r) => r.at <= q.to);
   return rows
     .map((r) => Object.assign({}, r, {
       batchCode: batchCode(data, r.batchId),
       probeCode: probeCode(data, r.probeId),
+      backfill: r.backfill === true,
+      backfilledAt: r.backfilledAt || '',
+      basis: r.basis || '',
       outOfRange: Number(r.temperatureC) > Number(data.settings.upperLimitC) || Number(r.temperatureC) < Number(data.settings.lowerLimitC),
     }))
     .sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -307,6 +318,15 @@ function validateRecord(data, payload) {
 
 function createRecord(data, payload) {
   validateRecord(data, payload);
+  // 手工记录只收当前时刻前后一个记录间隔内的时刻；更早的历史时刻属于补录，
+  // 必须走补录入口（带依据、受窗口限制），免得补录和原始记录又混在一起
+  if (payload.source === '人工') {
+    const interval = Number(data.settings.recordIntervalMinutes);
+    const age = store.minutesBetween(String(payload.at), store.nowText());
+    if (age > interval) {
+      throw new AppError(409, 'MANUAL_RECORD_TOO_OLD', '手工记录只接受当前时刻往前 ' + interval + ' 分钟（一个记录间隔）内的时刻；更早的时刻属于补录，请走补录入口（带依据，窗口 ' + Number(data.settings.backfillWindowHours) + ' 小时）', { at: '历史时刻的手工记录要走补录入口' });
+    }
+  }
   const record = {
     id: store.nextId('rc', data.records),
     batchId: payload.batchId,
@@ -326,6 +346,135 @@ function removeRecord(data, id) {
   if (!record) throw new AppError(404, 'RECORD_NOT_FOUND', '这条温度记录不存在');
   data.records = data.records.filter((r) => r.id !== id);
   return { removed: id };
+}
+
+// 补录：只收窗口内的历史时刻，超窗一律拒绝；
+// 落进断链缺口时把缺口固化成「曾经断链」事件，补录不能把断链一笔勾掉
+function backfillRecord(data, payload) {
+  const errors = {};
+  const batch = data.batches.find((b) => b.id === payload.batchId);
+  if (!batch) errors.batchId = '批次不存在';
+  const probe = data.probes.find((p) => p.id === payload.probeId);
+  if (!probe) errors.probeId = '探头不存在';
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(payload.at || ''))) errors.at = '记录时刻格式要像 2026-09-01 08:00:00';
+  if (payload.temperatureC === undefined || payload.temperatureC === '') errors.temperatureC = '温度不能为空';
+  if (!String(payload.operator || '').trim()) errors.operator = '补录登记人要填';
+  if (!String(payload.basis || '').trim()) errors.basis = '补录依据要填（比如交接班记录、设备日志编号）';
+  if (Object.keys(errors).length) throw new AppError(400, 'VALIDATION_FAILED', '这条补录没通过校验', errors);
+
+  const windowHours = Number(data.settings.backfillWindowHours);
+  const nowText = store.nowText();
+  const ageMinutes = store.minutesBetween(String(payload.at), nowText);
+  if (ageMinutes < 0) {
+    throw new AppError(400, 'BACKFILL_IN_FUTURE', '补录不能填未来时刻（窗口 ' + windowHours + ' 小时，按当前时刻 ' + nowText + ' 减记录时刻计算）', { at: '记录时刻晚于当前时刻' });
+  }
+  if (ageMinutes > windowHours * 60) {
+    throw new AppError(409, 'BACKFILL_WINDOW_EXCEEDED', '超过补录窗口，一律不接受：窗口 ' + windowHours + ' 小时（按当前时刻 ' + nowText + ' 减记录时刻计算），这条已经超了 ' + (ageMinutes - windowHours * 60) + ' 分钟', { at: '记录时刻距当前超过 ' + windowHours + ' 小时' });
+  }
+
+  // 先找出补录落点覆盖的缺口，再插记录——顺序不能反
+  const covering = coldlib.gapsCovering(data, payload.batchId, String(payload.at));
+  const record = {
+    id: store.nextId('rc', data.records),
+    batchId: payload.batchId,
+    probeId: payload.probeId,
+    at: String(payload.at),
+    temperatureC: Number(payload.temperatureC),
+    source: '人工',
+    operator: String(payload.operator).trim(),
+    remark: String(payload.remark || ''),
+    backfill: true,
+    backfilledAt: nowText,
+    basis: String(payload.basis).trim(),
+  };
+  data.records.push(record);
+
+  const closedGaps = [];
+  for (const gap of covering) {
+    let event = data.chainEvents.find((e) => e.batchId === payload.batchId && e.gapFrom === gap.from && e.gapTo === gap.to);
+    if (!event) {
+      event = {
+        id: store.nextId('ce', data.chainEvents),
+        batchId: payload.batchId,
+        gapFrom: gap.from,
+        gapTo: gap.to,
+        minutes: gap.minutes,
+        recordedAt: nowText,
+        backfillRecordIds: [],
+      };
+      data.chainEvents.push(event);
+    }
+    event.backfillRecordIds.push(record.id);
+    closedGaps.push(event);
+  }
+  return {
+    record: Object.assign({}, record, { batchCode: batchCode(data, record.batchId), probeCode: probeCode(data, record.probeId) }),
+    closedGaps: closedGaps,
+  };
+}
+
+// 断链归因登记：缺口必须是真实存在的（当前缺口或曾经断链事件），一个缺口一条，重复登记视为更正并需重新确认
+function registerGapAttribution(data, batchId, payload) {
+  const batch = data.batches.find((b) => b.id === batchId);
+  if (!batch) throw new AppError(404, 'BATCH_NOT_FOUND', '这个批次不存在');
+  const errors = {};
+  if (!coldlib.GAP_CATEGORIES.includes(payload.category)) errors.category = '分类只能是：' + coldlib.GAP_CATEGORIES.join('、');
+  if (!String(payload.basis || '').trim()) errors.basis = '归因依据要填';
+  if (!String(payload.registrar || '').trim()) errors.registrar = '登记人要填';
+  if (Object.keys(errors).length) throw new AppError(400, 'VALIDATION_FAILED', '这次归因登记没通过校验', errors);
+
+  const from = String(payload.gapFrom || '');
+  const to = String(payload.gapTo || '');
+  const inCurrent = coldlib.rawGaps(data, batchId).some((g) => g.from === from && g.to === to);
+  const inEvents = data.chainEvents.some((e) => e.batchId === batchId && e.gapFrom === from && e.gapTo === to);
+  if (!inCurrent && !inEvents) {
+    throw new AppError(404, 'GAP_NOT_FOUND', '这段缺口不存在：' + from + ' 到 ' + to + '，既不是当前缺口也不是曾经断链', { gapFrom: '缺口起止与检测结果对不上' });
+  }
+
+  const minutes = store.minutesBetween(from, to);
+  const existing = coldlib.attributionFor(data, batchId, from, to);
+  if (existing) {
+    Object.assign(existing, {
+      category: payload.category,
+      basis: String(payload.basis).trim(),
+      registrar: String(payload.registrar).trim(),
+      registeredAt: store.nowText(),
+      confirmed: false,
+      confirmedBy: '',
+      confirmedAt: '',
+    });
+    return existing;
+  }
+  const attribution = {
+    id: store.nextId('ga', data.gapAttributions),
+    batchId: batchId,
+    gapFrom: from,
+    gapTo: to,
+    minutes: minutes,
+    category: payload.category,
+    basis: String(payload.basis).trim(),
+    registrar: String(payload.registrar).trim(),
+    registeredAt: store.nowText(),
+    confirmed: false,
+    confirmedBy: '',
+    confirmedAt: '',
+  };
+  data.gapAttributions.push(attribution);
+  return attribution;
+}
+
+// 归因确认：可豁免分类经确认后才不参与判定；其余分类确认只表示查过，不影响判定
+function confirmGapAttribution(data, id, payload) {
+  const attribution = data.gapAttributions.find((a) => a.id === id);
+  if (!attribution) throw new AppError(404, 'ATTRIBUTION_NOT_FOUND', '这条归因登记不存在');
+  if (attribution.confirmed) throw new AppError(409, 'ALREADY_CONFIRMED', '这条归因已经确认过了', { confirmedBy: attribution.confirmedBy, confirmedAt: attribution.confirmedAt });
+  if (!String((payload && payload.confirmer) || '').trim()) {
+    throw new AppError(400, 'VALIDATION_FAILED', '确认人要填', { confirmer: '确认人不能为空' });
+  }
+  attribution.confirmed = true;
+  attribution.confirmedBy = String(payload.confirmer).trim();
+  attribution.confirmedAt = store.nowText();
+  return attribution;
 }
 
 function listReleases(data, query) {
@@ -358,7 +507,9 @@ function decide(data, batchId, payload) {
     mkt: check.mkt,
     longestExcursionMinutes: check.longestMinutes,
     totalExcursionMinutes: check.totalMinutes,
-    chainGapCount: check.chain.gapCount,
+    chainGapCount: check.chain.counted,
+    chainEventCount: check.chain.eventCount,
+    chainExemptedCount: check.chain.exemptedCount,
     basis: String(payload.basis || '').trim(),
     remark: String(payload.remark || ''),
   };
@@ -372,7 +523,8 @@ module.exports = {
   listRooms, roomDetail, createRoom, updateRoom, removeRoom,
   listProbes, createProbe, updateProbe, removeProbe,
   listBatches, batchDetail, createBatch, updateBatch, removeBatch,
-  listRecords, createRecord, removeRecord,
+  listRecords, createRecord, removeRecord, backfillRecord,
+  registerGapAttribution, confirmGapAttribution,
   listReleases, decide,
   ROOM_STATUS, ROOM_TYPE, PROBE_STATUS, BATCH_STATUS, SOURCE_LIST,
 };

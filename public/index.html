@@ -96,7 +96,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>批次清单</h2>
-            <span class="panel-hint">点一行展开温度记录、超限段、断链与放行判定</span>
+            <span class="panel-hint">点一行展开温度记录、超限段、断链归因与放行判定</span>
           </div>
           <div class="table-wrap">
             <table class="data-table">
@@ -117,7 +117,10 @@
         <div class="panel">
           <div class="panel-head">
             <h2>温度记录</h2>
-            <button type="button" class="btn" data-action="record-add">新增记录</button>
+            <div>
+              <button type="button" class="btn" data-action="record-add">新增记录</button>
+              <button type="button" class="btn" data-action="record-backfill">补录记录</button>
+            </div>
           </div>
           <div class="records-note" id="recordsNote"></div>
           <div class="table-wrap">
@@ -125,7 +128,7 @@
               <thead>
                 <tr>
                   <th>批次</th><th>探头</th><th>时刻</th><th class="num">温度(℃)</th><th>来源</th>
-                  <th>登记人</th><th>是否超限</th><th>操作</th>
+                  <th>登记人</th><th>是否超限</th><th>补录依据 / 补录时刻</th><th>操作</th>
                 </tr>
               </thead>
               <tbody id="recordRows"></tbody>

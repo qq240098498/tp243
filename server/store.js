@@ -14,12 +14,13 @@ const DEFAULT_SETTINGS = {
   gasConstant: 8.314,
   probeCalibrationGraceDays: 0,
   recordIntervalMinutes: 15,
+  backfillWindowHours: 24,
 };
 
 function normalize(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   data.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
-  for (const key of ['rooms', 'probes', 'batches', 'records', 'releases']) {
+  for (const key of ['rooms', 'probes', 'batches', 'records', 'releases', 'gapAttributions', 'chainEvents']) {
     if (!Array.isArray(data[key])) data[key] = [];
   }
   return data;
